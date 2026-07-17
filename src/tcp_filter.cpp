@@ -169,6 +169,7 @@ bool TcpFilter<T>::readExact(void * buf, size_t len)
   size_t got = 0;
   while (got < len) {
     ssize_t n = recv(sockfd_, p + got, len - got, 0);
+    std::cout << "recv returned = " << n << std::endl;
     if (n <= 0) {
       return false;  // connection closed, or a real error
     }
@@ -1006,9 +1007,10 @@ void TcpFilter<T>::run()
     pfd.fd = sockfd_;
     pfd.events = POLLIN;
     pfd.revents = 0;
-
+std::cout << "Waiting in poll..." << std::endl;
     const int rv = poll(&pfd, 1, static_cast<int>(timeout_sec * 1000.0));
-
+std::cout << "poll returned = " << rv
+          << " revents = " << pfd.revents << std::endl;
     if (rv > 0 && (pfd.revents & POLLIN)) {
       if (!readOnePacket()) {
         std::cerr << "Connection closed by server.\n";
