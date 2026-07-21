@@ -187,12 +187,15 @@ bool TcpFilter<T>::readOnePacket()
   }
 
   if (hdr.type == PACKET_IMU) {
+    std::cout << "*******************Reading IMU packet...\n";
     ImuData imu;
     if (!readExact(&imu, sizeof(imu))) {
       return false;
     }
     handleImuPacket(imu);
   } else if (hdr.type == PACKET_ODOM) {
+
+      std::cout << "*************************Reading ODOM packet...\n";
     OdomData odom;
     if (!readExact(&odom, sizeof(odom))) {
       return false;
@@ -330,29 +333,115 @@ bool TcpFilter<T>::prepareImuPose(
 {
   // Per the sensor_msgs/Imu convention: a first covariance value of -1
   // means "no orientation data available", so skip it.
+
+  std::cout <<"****************imu.orientation_covariance[0]**************** " <<imu.orientation_covariance[0] <<std::endl;
   if (std::fabs(imu.orientation_covariance[0] + 1.0) < 1e-9) {
     return false;
   }
+
+
+std::cout << "Quaternion:\n";
+std::cout << "x = " << imu.orientation.x << std::endl;
+std::cout << "y = " << imu.orientation.y << std::endl;
+std::cout << "z = " << imu.orientation.z << std::endl;
+std::cout << "w = " << imu.orientation.w << std::endl;
 
   double roll, pitch, yaw;
   quaternionToRPY(
     imu.orientation.x, imu.orientation.y, imu.orientation.z,
     imu.orientation.w, roll, pitch, yaw);
 
+
+std::cout << "Converted RPY:\n";
+std::cout << "Roll  = " << roll << std::endl;
+std::cout << "Pitch = " << pitch << std::endl;
+std::cout << "Yaw   = " << yaw << std::endl;
+
+
+
   measurement(StateMemberRoll) = roll;
   measurement(StateMemberPitch) = pitch;
   measurement(StateMemberYaw) = yaw;
 
-  for (int i = 0; i < ORIENTATION_SIZE; ++i) {
-    for (int j = 0; j < ORIENTATION_SIZE; ++j) {
-      measurement_covariance(ORIENTATION_OFFSET + i, ORIENTATION_OFFSET + j) =
-        imu.orientation_covariance[ORIENTATION_SIZE * i + j];
+  // for (int i = 0; i < ORIENTATION_SIZE; ++i) {
+  //   for (int j = 0; j < ORIENTATION_SIZE; ++j) {
+  //     measurement_covariance(ORIENTATION_OFFSET + i, ORIENTATION_OFFSET + j) =
+  //       imu.orientation_covariance[ORIENTATION_SIZE * i + j];
+  //   }
+  // }
+
+
+
+  for (int i = 0; i < ORIENTATION_SIZE; ++i)
+{
+    for (int j = 0; j < ORIENTATION_SIZE; ++j)
+    {
+        std::cout
+            << "Copy orientation_covariance["
+            << (ORIENTATION_SIZE * i + j)
+            << "] = "
+            << imu.orientation_covariance[ORIENTATION_SIZE * i + j]
+            << " --> measurement_covariance("
+            << (ORIENTATION_OFFSET + i)
+            << ","
+            << (ORIENTATION_OFFSET + j)
+            << ")"
+            << std::endl;
+
+        measurement_covariance(
+            ORIENTATION_OFFSET + i,
+            ORIENTATION_OFFSET + j) =
+            imu.orientation_covariance[
+                ORIENTATION_SIZE * i + j];
     }
-  }
+}
+
+
+std::cout << "\nOrientation Covariance Block:\n";   //just to debug
+
+for (int i = 3; i <= 5; i++)
+{
+    for (int j = 3; j <= 5; j++)
+    {
+        std::cout << measurement_covariance(i,j)
+                  << " ";
+    }
+    std::cout << std::endl;
+}
+
+
+std::cout << "\n===== BEFORE forceTwoD =====\n";
+
+std::cout << "Measurement:\n";
+for (int i = 0; i < STATE_SIZE; i++) {
+    std::cout << i << " : " << measurement(i) << std::endl;
+}
+
+std::cout << "\nUpdate Vector:\n";
+for (int i = 0; i < STATE_SIZE; i++) {
+    std::cout << i << " : " << update_vector[i] << std::endl;
+}
+
+
 
   if (two_d_mode_) {
     forceTwoD(measurement, measurement_covariance, update_vector);
   }
+
+
+  std::cout << "\n===== AFTER forceTwoD =====\n";
+
+std::cout << "Measurement:\n";
+for (int i = 0; i < STATE_SIZE; i++) {
+    std::cout << i << " : " << measurement(i) << std::endl;
+}
+
+std::cout << "\nUpdate Vector:\n";
+for (int i = 0; i < STATE_SIZE; i++) {
+    std::cout << i << " : " << update_vector[i] << std::endl;
+}
+
+
 
   return true;
 }
@@ -371,12 +460,34 @@ bool TcpFilter<T>::prepareImuTwist(
   measurement(StateMemberVpitch) = imu.angular_velocity.y;
   measurement(StateMemberVyaw) = imu.angular_velocity.z;
 
+  // for (int i = 0; i < ORIENTATION_SIZE; ++i) {
+  //   for (int j = 0; j < ORIENTATION_SIZE; ++j) {
+  //     measurement_covariance(ORIENTATION_V_OFFSET + i, ORIENTATION_V_OFFSET + j) =
+  //       imu.angular_velocity_covariance[ORIENTATION_SIZE * i + j];
+  //   }
+  // }
+
+
+std::cout << "****************************************hello********************************"<< std::endl;
   for (int i = 0; i < ORIENTATION_SIZE; ++i) {
     for (int j = 0; j < ORIENTATION_SIZE; ++j) {
-      measurement_covariance(ORIENTATION_V_OFFSET + i, ORIENTATION_V_OFFSET + j) =
-        imu.angular_velocity_covariance[ORIENTATION_SIZE * i + j];
+
+        std::cout << "Copying source["
+                  << (ORIENTATION_SIZE * i + j)
+                  << "] = "
+                  << imu.angular_velocity_covariance[ORIENTATION_SIZE * i + j]
+                  << " --> measurement_covariance("
+                  << (ORIENTATION_V_OFFSET + i)
+                  << ", "
+                  << (ORIENTATION_V_OFFSET + j)
+                  << ")"
+                  << std::endl;
+
+        measurement_covariance(ORIENTATION_V_OFFSET + i,
+                               ORIENTATION_V_OFFSET + j) =
+            imu.angular_velocity_covariance[ORIENTATION_SIZE * i + j];
     }
-  }
+}
 
   if (two_d_mode_) {
     forceTwoD(measurement, measurement_covariance, update_vector);
@@ -574,6 +685,13 @@ void TcpFilter<T>::enqueueMeasurement(
   const std::vector<bool> & update_vector, const double mahalanobis_thresh,
   const Time & time)
 {
+
+std::cout << "\n=============================================\n";
+std::cout << "enqueueMeasurement()" << std::endl;
+std::cout << "Topic : " << topic_name << std::endl;
+std::cout << "Time  : " << time.seconds()<< std::endl;
+
+
   MeasurementPtr meas = MeasurementPtr(new Measurement());
 
   meas->topic_name_ = topic_name;
@@ -587,12 +705,33 @@ void TcpFilter<T>::enqueueMeasurement(
   meas->latest_control_ = Eigen::VectorXd::Zero(0);
   meas->latest_control_time_ = Time(0.0);
 
+
+
+std::cout << "\nQueue size BEFORE push = "
+          << measurement_queue_.size()
+          << std::endl;
   measurement_queue_.push(meas);
+
+std::cout << "Queue size AFTER push = "
+          << measurement_queue_.size()
+          << std::endl;
+
 }
 
 template<class T>
 void TcpFilter<T>::integrateMeasurements(const Time & current_time)
 {
+
+
+
+std::cout << "\n========== integrateMeasurements ==========\n";
+std::cout << "Current time = " << current_time.seconds() << std::endl;
+std::cout << "Queue size at entry = "
+          << measurement_queue_.size()
+          << std::endl;
+
+
+
   bool predict_to_current_time = predict_to_current_time_;
 
   if (!measurement_queue_.empty()) {
@@ -605,7 +744,8 @@ void TcpFilter<T>::integrateMeasurements(const Time & current_time)
       revertTo(Time(first_measurement_time.seconds() - 1e-9));
     }
 
-    while (!measurement_queue_.empty()) {
+
+      while (!measurement_queue_.empty()) {
       MeasurementPtr measurement = measurement_queue_.top();
 
       // Measurements are stored earliest-first, so once we hit one that's
@@ -614,8 +754,23 @@ void TcpFilter<T>::integrateMeasurements(const Time & current_time)
       if (current_time < measurement->time_) {
         break;
       }
+std::cout << "Queue BEFORE pop = "
+          << measurement_queue_.size()
+          << std::endl;
+
+
 
       measurement_queue_.pop();
+
+
+
+
+      std::cout << "Queue AFTER pop = "
+          << measurement_queue_.size()
+          << std::endl;
+
+
+
 
       // This calls predict() and, if appropriate, correct() internally.
       filter_.processMeasurement(*(measurement.get()));
@@ -1007,7 +1162,7 @@ void TcpFilter<T>::run()
     pfd.fd = sockfd_;
     pfd.events = POLLIN;
     pfd.revents = 0;
-std::cout << "Waiting in poll..." << std::endl;
+std::cout << "Waiting in poll **************..." << std::endl;
     const int rv = poll(&pfd, 1, static_cast<int>(timeout_sec * 1000.0));
 std::cout << "poll returned = " << rv
           << " revents = " << pfd.revents << std::endl;

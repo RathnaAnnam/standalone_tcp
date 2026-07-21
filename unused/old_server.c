@@ -146,7 +146,7 @@ for (int i = 0; i < 9; i++)
 
 
 
-        sleep(1);
+        usleep(50000);           // 50,000 microseconds = 50 ms
 
         //---------------- ODOM -----------------
 
