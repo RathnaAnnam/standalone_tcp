@@ -19,4 +19,25 @@ enum PacketType
     PACKET_FILTERED_ODOM = 3
 };
 
+
+
+typedef struct
+{
+    PacketHeader header;
+    ImuData data;
+} ImuPacket;
+
+typedef struct
+{
+    PacketHeader header;
+    OdomData data;
+} OdomPacket;
+
+typedef struct
+{
+    PacketHeader header;
+    OdomData data;  // filtered output reuses the OdomData layout
+} FilteredOdomPacket;
+
+
 #endif  // TCP_PROTOCOL_HPP_

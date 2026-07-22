@@ -1,3 +1,7 @@
+
+
+
+
 /*
  * tcp_filter.hpp
  *
@@ -48,6 +52,8 @@
 #include <queue>
 #include <string>
 #include <vector>
+
+#include <netinet/in.h>  // struct sockaddr_in
 
 // Adjust these include paths to match wherever your converted
 // ekf.hpp / filter_base.hpp / filter_common.hpp / filter_time.hpp /
@@ -133,7 +139,11 @@ public:
 
   ~TcpFilter();
 
-  //! @brief Connects to the TCP server. Must be called before run().
+  //! @brief Opens the UDP socket and binds it to `port` so it can receive
+  //! datagrams from udp_server.c. Despite the name (kept for minimal
+  //! diff/API compatibility), there is no TCP connection any more - UDP is
+  //! connectionless, so this just prepares the local socket. Must be
+  //! called before run().
   //! @return true on success
   //!
   bool connectToServer();
@@ -208,7 +218,13 @@ public:
 protected:
   // ---- Packet handling ----------------------------------------------
 
-  bool readExact(void * buf, size_t len);
+  //! @brief Reads exactly one UDP datagram into buf (max_len is the buffer
+  //! capacity, out_len receives the actual datagram size). Also records
+  //! the sender's address in peer_addr_/have_peer_addr_, so
+  //! sendFilteredOdom() can reply to whoever is actually sending us data
+  //! without needing a fixed/known source port on their end.
+  //!
+  bool recvDatagram(void * buf, size_t max_len, size_t & out_len);
   bool readOnePacket();
 
   void handleImuPacket(const ImuData & imu);
@@ -295,6 +311,12 @@ protected:
   std::string server_ip_;
   int port_;
   int sockfd_;
+
+  //! @brief Address of whoever last sent us a datagram (learned from
+  //! recvfrom(), since UDP has no accept() to give us this for free).
+  //! Used by sendFilteredOdom() to sendto() a reply to the right place.
+  struct sockaddr_in peer_addr_;
+  bool have_peer_addr_;
 
   Time last_set_pose_time_;
   Time last_published_stamp_;

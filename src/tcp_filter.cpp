@@ -1,24 +1,4 @@
-/*
- * tcp_filter.cpp
- *
- * Standalone replacement for robot_localization's ros_filter.cpp.
- * See tcp_filter.hpp for a summary of what was dropped vs. the original
- * (tf2 transforms, ROS params/topics/services/diagnostics, multi-sensor
- * support) and why.
- *
- * Build (adjust include/library paths for your project layout):
- *
- *   g++ -std=c++17 -O2 \
- *       -I. -I/usr/include/eigen3 \
- *       tcp_filter.cpp ekf.cpp filter_base.cpp filter_utilities.cpp \
- *       -o tcp_filter
- *
- * Run:
- *
- *   ./tcp_filter [server_ip] [port]
- *
- * with server.c already running and listening.
- */
+
 
 #include "ekf/tcp_filter.hpp"
 #include "ekf/ekf.hpp"
@@ -65,8 +45,9 @@ namespace robot_localization
 
 template<class T>
 TcpFilter<T>::TcpFilter(const std::string & server_ip, int port)
-: server_ip_(server_ip), port_(port), sockfd_(-1)
+: server_ip_(server_ip), port_(port), sockfd_(-1), have_peer_addr_(false)
 {
+  memset(&peer_addr_, 0, sizeof(peer_addr_));
   two_d_mode_ = false;
   predict_to_current_time_ = true;
   remove_gravitational_acceleration_ = false;
@@ -131,7 +112,13 @@ void TcpFilter<T>::reset()
 template<class T>
 bool TcpFilter<T>::connectToServer()
 {
-  sockfd_ = socket(AF_INET, SOCK_STREAM, 0);
+  // "connectToServer" is a historical name kept for API compatibility with
+  // the TCP version - UDP is connectionless, so there is no handshake.
+  // What we actually need to do is open a UDP socket and bind() it to
+  // `port_`, so udp_server.c's sendto() calls (targeted at this port) are
+  // delivered to us. server_ip_ is no longer used to connect anywhere; it
+  // is kept around only in case you want to validate/filter senders later.
+  sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
   if (sockfd_ < 0) {
     perror("socket");
     return false;
@@ -141,70 +128,101 @@ bool TcpFilter<T>::connectToServer()
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons(static_cast<uint16_t>(port_));
+  addr.sin_addr.s_addr = INADDR_ANY;  // accept datagrams on any local interface
 
-  if (inet_pton(AF_INET, server_ip_.c_str(), &addr.sin_addr) <= 0) {
-    std::cerr << "Invalid server IP: " << server_ip_ << "\n";
+  if (bind(sockfd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+    perror("bind");
     close(sockfd_);
     sockfd_ = -1;
     return false;
   }
 
-  std::cout << "Connecting to " << server_ip_ << ":" << port_ << " ...\n";
-
-  if (connect(sockfd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-    perror("connect");
-    close(sockfd_);
-    sockfd_ = -1;
-    return false;
-  }
-
-  std::cout << "Connected.\n";
+  std::cout << "UDP socket bound on port " << port_
+            << ", waiting for datagrams from " << server_ip_ << " ...\n";
   return true;
 }
 
 template<class T>
-bool TcpFilter<T>::readExact(void * buf, size_t len)
+bool TcpFilter<T>::recvDatagram(void * buf, size_t max_len, size_t & out_len)
 {
-  uint8_t * p = static_cast<uint8_t *>(buf);
-  size_t got = 0;
-  while (got < len) {
-    ssize_t n = recv(sockfd_, p + got, len - got, 0);
-    std::cout << "recv returned = " << n << std::endl;
-    if (n <= 0) {
-      return false;  // connection closed, or a real error
-    }
-    got += static_cast<size_t>(n);
+  struct sockaddr_in from_addr;
+  socklen_t from_len = sizeof(from_addr);
+
+  // Unlike TCP's recv(), one recvfrom() call returns exactly one whole
+  // datagram (or truncates it if buf is too small - which is why buf must
+  // be sized to the largest packet type, see readOnePacket()). There is no
+  // "keep reading until len bytes" loop like the old readExact(), because
+  // UDP does not work that way.
+  ssize_t n = recvfrom(
+    sockfd_, buf, max_len, 0,
+    reinterpret_cast<struct sockaddr *>(&from_addr), &from_len);
+
+  if (n < 0) {
+    perror("recvfrom");
+    return false;
   }
+  if (n == 0) {
+    // A zero-length UDP datagram is unusual but not an error/disconnect
+    // the way it is for TCP - there is no "connection" to be closed.
+    out_len = 0;
+    return true;
+  }
+
+  // Remember who sent this, so sendFilteredOdom() can reply directly to
+  // them even though (unlike TCP's accept()) UDP never gave us their
+  // address up front.
+  peer_addr_ = from_addr;
+  have_peer_addr_ = true;
+
+  out_len = static_cast<size_t>(n);
   return true;
 }
 
 template<class T>
 bool TcpFilter<T>::readOnePacket()
 {
-  PacketHeader hdr;
-  if (!readExact(&hdr, sizeof(hdr))) {
+  // Sized to hold the largest possible datagram we expect (OdomPacket is
+  // bigger than ImuPacket). If a datagram arrives larger than this, the
+  // kernel silently truncates it for a UDP socket - keep this comfortably
+  // larger than sizeof(OdomPacket) if you ever extend the protocol.
+  uint8_t buf[sizeof(OdomPacket) + 64];
+  size_t n = 0;
+
+  if (!recvDatagram(buf, sizeof(buf), n)) {
     return false;
   }
 
+  if (n < sizeof(PacketHeader)) {
+    std::cerr << "Short UDP datagram (" << n << " bytes) - ignoring.\n";
+    return true;  // not fatal for UDP - just drop this one and keep going
+  }
+
+  PacketHeader hdr;
+  std::memcpy(&hdr, buf, sizeof(hdr));
+
   if (hdr.type == PACKET_IMU) {
+    if (n < sizeof(ImuPacket)) {
+      std::cerr << "Truncated IMU datagram (" << n << " bytes) - ignoring.\n";
+      return true;
+    }
     std::cout << "*******************Reading IMU packet...\n";
     ImuData imu;
-    if (!readExact(&imu, sizeof(imu))) {
-      return false;
-    }
+    std::memcpy(&imu, buf + sizeof(PacketHeader), sizeof(imu));
     handleImuPacket(imu);
   } else if (hdr.type == PACKET_ODOM) {
-
-      std::cout << "*************************Reading ODOM packet...\n";
-    OdomData odom;
-    if (!readExact(&odom, sizeof(odom))) {
-      return false;
+    if (n < sizeof(OdomPacket)) {
+      std::cerr << "Truncated ODOM datagram (" << n << " bytes) - ignoring.\n";
+      return true;
     }
+    std::cout << "*************************Reading ODOM packet...\n";
+    OdomData odom;
+    std::memcpy(&odom, buf + sizeof(PacketHeader), sizeof(odom));
     handleOdomPacket(odom);
   } else {
-    std::cerr << "Unknown packet type (" << hdr.type <<
-      "). Dropping connection.\n";
-    return false;
+    // Unlike TCP, an unrecognized packet type doesn't mean the "connection"
+    // is corrupt - there's no byte-stream to get out of sync. Just drop
+    // this one datagram and keep listening.
+    std::cerr << "Unknown packet type (" << hdr.type << "). Dropping datagram.\n";
   }
 
   return true;
@@ -944,6 +962,14 @@ void TcpFilter<T>::sendFilteredOdom(const FilteredState & state)
     return;
   }
 
+  // UDP has no accept(), so we don't have a "the" client the way the TCP
+  // version did - reply to whoever most recently sent us a datagram.
+  if (!have_peer_addr_) {
+    std::cerr << "sendFilteredOdom: no known peer yet (haven't received "
+                 "any datagrams) - skipping.\n";
+    return;
+  }
+
   OdomData out;
   memset(&out, 0, sizeof(out));
 
@@ -980,15 +1006,18 @@ void TcpFilter<T>::sendFilteredOdom(const FilteredState & state)
     out.twist.covariance[i] = state.twist_covariance[i];
   }
 
-  PacketHeader hdr;
-  hdr.type = PACKET_FILTERED_ODOM;
+  // Header + payload must go out as ONE datagram (see the framing note in
+  // tcp_protocol.hpp) - two separate sendto() calls would be two separate,
+  // independently-droppable/reorderable UDP packets.
+  FilteredOdomPacket pkt;
+  pkt.header.type = PACKET_FILTERED_ODOM;
+  pkt.data = out;
 
-  if (send(sockfd_, &hdr, sizeof(hdr), 0) != static_cast<ssize_t>(sizeof(hdr))) {
-    std::cerr << "Warning: failed to send filtered-odom header.\n";
-    return;
-  }
-  if (send(sockfd_, &out, sizeof(out), 0) != static_cast<ssize_t>(sizeof(out))) {
-    std::cerr << "Warning: failed to send filtered-odom payload.\n";
+  ssize_t sent = sendto(
+    sockfd_, &pkt, sizeof(pkt), 0,
+    reinterpret_cast<struct sockaddr *>(&peer_addr_), sizeof(peer_addr_));
+  if (sent != static_cast<ssize_t>(sizeof(pkt))) {
+    std::cerr << "Warning: failed to send filtered-odom datagram.\n";
   }
 }
 
@@ -1168,7 +1197,10 @@ std::cout << "poll returned = " << rv
           << " revents = " << pfd.revents << std::endl;
     if (rv > 0 && (pfd.revents & POLLIN)) {
       if (!readOnePacket()) {
-        std::cerr << "Connection closed by server.\n";
+        // Unlike TCP, this means a real socket error (see perror() inside
+        // recvDatagram()), not "the other side hung up" - UDP has no
+        // connection to hang up.
+        std::cerr << "UDP socket error - stopping.\n";
         break;
       }
     } else if (rv < 0) {
@@ -1207,8 +1239,10 @@ template class robot_localization::TcpFilter<robot_localization::Ekf>;
 
 int main(int argc, char ** argv)
 {
-  std::string server_ip = "10.40.41.112";  // matches SERVER_IP in server.c
-  int port = 10000;                        // matches PORT in server.c
+  std::string server_ip = "10.40.41.112";  // sender's IP (informational only for UDP)
+  int port = 10000;                        // local UDP port to bind() and listen on -
+                                            // must match the DEST_PORT udp_server.c
+                                            // sends to
 
   if (argc >= 2) {
     server_ip = argv[1];
@@ -1230,11 +1264,12 @@ int main(int argc, char ** argv)
   node.smooth_lagged_data_ = false;
   node.print_output_ = true;
 
-  // server.c only sends data - it never calls recv() - so sending fused
-  // output back on the same socket would just pile up unread bytes on the
-  // server side. Leave this off unless you extend server.c (or point this
-  // program at a different listener) to actually consume
-  // PACKET_FILTERED_ODOM packets.
+  // udp_server.c only sends data - it never calls recv()/recvfrom() - so
+  // enabling this will just send PACKET_FILTERED_ODOM datagrams into the
+  // void unless you extend udp_server.c (or point this program at a
+  // different listener) to actually consume them. Unlike TCP, this is
+  // harmless either way (no bytes "pile up" - UDP just drops what nobody
+  // reads), but there's no point enabling it until something listens.
   node.send_filtered_output_ = false;
 
   node.world_frame_id_ = "odom";
@@ -1269,3 +1304,4 @@ node.odom_twist_config_ = {
 
   return 0;
 }
+
