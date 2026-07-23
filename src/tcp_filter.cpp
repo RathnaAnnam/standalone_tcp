@@ -206,18 +206,27 @@ bool TcpFilter<T>::readOnePacket()
       return true;
     }
     std::cout << "*******************Reading IMU packet...\n";
-    ImuData imu;
-    std::memcpy(&imu, buf + sizeof(PacketHeader), sizeof(imu));
-    handleImuPacket(imu);
+    // ImuData imu;
+    // std::memcpy(&imu, buf + sizeof(PacketHeader), sizeof(imu));
+    // handleImuPacket(imu);
+
+     ImuPacket pkt;
+    std::memcpy(&pkt, buf, sizeof(pkt));
+    handleImuPacket(pkt.data);
   } else if (hdr.type == PACKET_ODOM) {
     if (n < sizeof(OdomPacket)) {
       std::cerr << "Truncated ODOM datagram (" << n << " bytes) - ignoring.\n";
       return true;
     }
     std::cout << "*************************Reading ODOM packet...\n";
-    OdomData odom;
-    std::memcpy(&odom, buf + sizeof(PacketHeader), sizeof(odom));
-    handleOdomPacket(odom);
+    // OdomData odom;
+    // std::memcpy(&odom, buf + sizeof(PacketHeader), sizeof(odom));
+    // handleOdomPacket(odom);
+
+        OdomPacket pkt;
+    std::memcpy(&pkt, buf, sizeof(pkt));
+    handleOdomPacket(pkt.data);
+
   } else {
     // Unlike TCP, an unrecognized packet type doesn't mean the "connection"
     // is corrupt - there's no byte-stream to get out of sync. Just drop
